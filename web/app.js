@@ -68,6 +68,8 @@ class RobotScene extends Phaser.Scene {
     super("RobotScene");
     this.cells = [];
     this.buttons = {};
+    this.renderTimer = null;
+    this.lastRender = 0;
   }
 
   create() {
@@ -80,8 +82,31 @@ class RobotScene extends Phaser.Scene {
     this.createConsole();
     this.createControls();
 
+    // The scene is static between incoming states and user interactions.
+    // Stop Phaser's continuous loop after each frame; input still uses DOM events.
+    this.game.events.on("postrender", () => {
+      this.game.loop.sleep();
+      this.lastRender = performance.now();
+    });
+    window.addEventListener("resize", () => {
+      this.scale.refresh();
+      this.requestRender();
+    });
+    document.addEventListener("visibilitychange", () => this.requestRender());
+
     if (latest) this.applyState(latest);
     this.setConnection(socket?.readyState === WebSocket.OPEN);
+  }
+
+  requestRender() {
+    if (document.hidden || this.renderTimer !== null) return;
+    // Coalesce updates and cap drawing at 30 FPS, independent of agent speed.
+    const delay = Math.max(0, 1000 / 30 - (performance.now() - this.lastRender));
+    this.renderTimer = window.setTimeout(() => {
+      this.renderTimer = null;
+      if (document.hidden) return;
+      this.game.step(performance.now(), 0);
+    }, delay);
   }
 
   text(x, y, value, size, color = COLORS.white, options = {}) {
@@ -253,7 +278,10 @@ class RobotScene extends Phaser.Scene {
       const maxScroll = Math.max(0, this.debugText.height - DEBUG.height);
       const currentScroll = DEBUG.y - this.debugText.y;
       const scroll = Phaser.Math.Clamp(currentScroll + dy, 0, maxScroll);
-      this.debugText.y = DEBUG.y - scroll;
+      if (scroll !== currentScroll) {
+        this.debugText.y = DEBUG.y - scroll;
+        this.requestRender();
+      }
     });
   }
 
@@ -354,9 +382,11 @@ class RobotScene extends Phaser.Scene {
   setConnection(connected) {
     this.connectionDot?.setFillStyle(connected ? COLORS.green : COLORS.red);
     this.connectionText?.setText(connected ? "CONNECTED" : "DISCONNECTED");
+    this.requestRender();
   }
 
   applyState(state) {
+    this.requestRender();
     const title = (state.title ?? "Markov Decision Process").toUpperCase();
     this.titleText.setText(title + "     /     GRID WORLD 04 × 04");
     const obstacles = new Set(
@@ -411,7 +441,8 @@ class RobotScene extends Phaser.Scene {
 }
 
 new Phaser.Game({
-  type: Phaser.AUTO,
+  // Canvas retains the last frame while idle without a continuous WebGL loop.
+  type: Phaser.CANVAS,
   parent: "game",
   width: 1120,
   height: 1060,
@@ -421,6 +452,8 @@ new Phaser.Game({
     autoCenter: Phaser.Scale.CENTER_BOTH,
   },
   render: { pixelArt: false, antialias: true },
+  fps: { target: 30, limit: 30, forceSetTimeOut: true },
+  audio: { noAudio: true },
   scene: RobotScene,
 });
 
