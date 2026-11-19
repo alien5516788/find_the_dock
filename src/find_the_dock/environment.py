@@ -11,7 +11,8 @@ class Environment:
     """A fixed 4x4 grid where a robot navigates to a charging station.
 
     Start: randomized on reset. Charging station: top-right (0, 3).
-    Obstacles are generated once and remain fixed across episode resets.
+    Holes are generated once and remain fixed across episode resets.
+    Entering a hole or reaching the charging station ends the episode.
     """
 
     SIZE = 4
@@ -71,7 +72,11 @@ class Environment:
             self._goal_state = State(
                 self.target.row, self.target.col, self.obstacle_positions
             )
-            # One flood fill from the dock finds all valid starts on this map.
+            self._terminal_states = (self._goal_state,) + tuple(
+                State(row, col, self.obstacle_positions)
+                for row, col in sorted(self.obstacle_positions)
+            )
+            # Valid starts have a route to the dock that avoids the holes.
             reachable = {(self.target.row, self.target.col)}
             queue = deque(reachable)
             while queue:
@@ -103,6 +108,7 @@ class Environment:
         self.state = self.start
         self.steps = 0
         self._success = False
+        self._terminated = False
         self._debug_messages: list[str] = []
         if self._renderer is not None:
             self._renderer.draw(self)
@@ -110,7 +116,7 @@ class Environment:
 
     def step(self, action: Action | int) -> tuple[State, float]:
         """Apply an action and return the resulting state and reward."""
-        if self._success:
+        if self._terminated:
             raise RuntimeError("Episode finished. Call reset() before stepping again.")
         if isinstance(action, bool) or not isinstance(action, int):
             raise TypeError("action must be a valid Action")
@@ -125,29 +131,29 @@ class Environment:
         dr, dc = self._MOVES[action]
         row, col = self.state.row + dr, self.state.col + dc
 
-        if (
-            not (0 <= row < self.SIZE and 0 <= col < self.SIZE)
-            or (row, col) in self.obstacle_positions
-        ):
+        if not (0 <= row < self.SIZE and 0 <= col < self.SIZE):
             reward = -5.0
         else:
             self.state = State(row, col, self.obstacle_positions)
-            reward = -1.0
+            reward = -5.0 if (row, col) in self.obstacle_positions else -1.0
 
         self.steps += 1
 
-        if self.state == self.terminal_state():
+        if self.state == self._goal_state:
             self._success = True
             reward = 100.0
+        self._terminated = self._success or (
+            self.state.row, self.state.col
+        ) in self.obstacle_positions
 
         if self._renderer is not None:
             self._renderer.after_step(self)
 
         return self.state, reward
 
-    def terminal_state(self) -> State:
-        """Return the terminal goal state (the charging station)."""
-        return self._goal_state
+    def terminal_states(self) -> list[State]:
+        """Return the dock followed by all hole states in coordinate order."""
+        return list(self._terminal_states)
 
     def debug_print(self, message: str) -> None:
         """Replace the on-screen debug text with the latest message."""
@@ -156,12 +162,11 @@ class Environment:
             self._renderer._update_debug(self._debug_messages[0])
 
     def _states(self) -> list[State]:
-        """Return every traversable position, including the terminal state."""
+        """Return every grid position, including the dock and terminal holes."""
         return [
             State(row, col, self.obstacle_positions)
             for row in range(self.SIZE)
             for col in range(self.SIZE)
-            if (row, col) not in self.obstacle_positions
         ]
 
     def _actions(self) -> list[Action]:

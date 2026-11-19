@@ -18,7 +18,7 @@ class Renderer:
 
     DISPLAY_FPS = 60
     DISPLAY_INTERVAL = 1 / DISPLAY_FPS
-    GOAL_HOLD_SECONDS = 0.18
+    TERMINAL_HOLD_SECONDS = 0.18
 
     def __init__(self, fps: int | None) -> None:
         self.fps = fps
@@ -250,7 +250,7 @@ class Renderer:
 
     def _handle_control(self, command: str | None) -> None:
         with self._condition:
-            finished = bool(self._latest_state and self._latest_state["success"])
+            finished = bool(self._latest_state and self._latest_state["finished"])
             if command == "toggle_play":
                 self.playing = not self.playing
                 self._steps_requested = 0
@@ -289,6 +289,7 @@ class Renderer:
             "obstacles": [list(pos) for pos in sorted(env.obstacle_positions)],
             "steps": env.steps,
             "success": env._success,
+            "finished": env._terminated,
             "debug": "\n".join(env._debug_messages),
         }
         with self._condition:
@@ -321,22 +322,22 @@ class Renderer:
         raise RuntimeError("Simulator browser closed")
 
     def after_step(self, env) -> None:
-        """Pace playback and keep the charging dock visible at episode success."""
+        """Pace playback and keep dock arrivals and hole entries visible."""
         with self._condition:
             manual = self._manual_step
-        self.draw(env, force=manual or env._success)
+        self.draw(env, force=manual or env._terminated)
 
-        # A successful episode would otherwise reset before the browser can
+        # A terminal episode would otherwise reset before the browser can
         # display its final state. This hold affects rendering, not rewards.
-        goal_deadline = (
-            time.perf_counter() + self.GOAL_HOLD_SECONDS if env._success else 0
+        terminal_deadline = (
+            time.perf_counter() + self.TERMINAL_HOLD_SECONDS if env._terminated else 0
         )
-        if manual and not env._success:
+        if manual and not env._terminated:
             return
 
         with self._condition:
             while not self._closed:
-                deadline = goal_deadline
+                deadline = terminal_deadline
                 if not manual:
                     effective_fps = self.DISPLAY_FPS if self.fps is None else self.fps
                     deadline = max(deadline, self._step_started + 1 / effective_fps)

@@ -63,7 +63,7 @@ def main():
         # Generate one complete episode
         episode: list[Step] = []
 
-        while s != environment.terminal_state() and len(episode) < max_steps:
+        while s not in environment.terminal_states() and len(episode) < max_steps:
             a = action(s)
 
             environment.debug_print(

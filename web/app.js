@@ -403,7 +403,7 @@ class RobotScene extends Phaser.Scene {
       }
     }
 
-    const finished = state.success;
+    const finished = state.finished;
     const mode = finished ? "FINISHED"
       : state.playing ? "RUNNING" : "PAUSED";
     this.stepsText.setText(String(state.steps) + " STEPS");
