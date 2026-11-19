@@ -19,6 +19,7 @@ class Renderer:
     DISPLAY_FPS = 60
     DISPLAY_INTERVAL = 1 / DISPLAY_FPS
     TERMINAL_HOLD_SECONDS = 0.18
+    START_HOLD_SECONDS = 0.18
 
     def __init__(self, fps: int | None) -> None:
         self.fps = fps
@@ -27,6 +28,7 @@ class Renderer:
         self._steps_requested = 0
         self._manual_step = False
         self._step_started = 0.0
+        self._start_visible_until = 0.0
 
         self._condition = threading.Condition()
         self._closed_event = threading.Event()
@@ -296,10 +298,19 @@ class Renderer:
             snapshot = {**state, "fps": self.fps, "playing": self.playing}
             if snapshot == self._latest_state:
                 return
+            previous = self._latest_state
+            new_start = env.steps == 0 and (
+                previous is None
+                or previous["steps"] != 0
+                or previous["robot"] != snapshot["robot"]
+            )
+            if new_start:
+                # Do not let the first action overwrite the spawn before it is drawn.
+                self._start_visible_until = time.perf_counter() + self.START_HOLD_SECONDS
             self._latest_state = snapshot
             self._revision += 1
 
-        self._notify_snapshot(force=force)
+        self._notify_snapshot(force=force or new_start)
 
     def before_step(self, env) -> None:
         """Block while paused, consuming at most one Step request per action."""
@@ -307,6 +318,11 @@ class Renderer:
             self.draw(env, force=True)
         with self._condition:
             while not self._closed:
+                if self.playing or self._steps_requested:
+                    remaining = self._start_visible_until - time.perf_counter()
+                    if remaining > 0:
+                        self._condition.wait(timeout=remaining)
+                        continue
                 if self.playing:
                     self._manual_step = False
                     env.fps = self.fps
