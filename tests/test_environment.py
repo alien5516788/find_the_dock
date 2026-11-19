@@ -210,6 +210,46 @@ class EnvironmentTests(unittest.TestCase):
         self.assertEqual(renderer._latest_state["fps"], 29)
         self.assertEqual(renderer._latest_state["playing"], False)
 
+        # Reaching the dock ends an episode, not the training session.
+        renderer._latest_state["success"] = True
+        renderer._steps_requested = 0
+        renderer._handle_control("toggle_play")
+        self.assertTrue(renderer.playing)
+        renderer._handle_control("toggle_play")
+        self.assertFalse(renderer.playing)
+        renderer._handle_control("step")
+        self.assertEqual(renderer._steps_requested, 0)
+
+    def test_renderer_goal_state_is_published_and_held(self):
+        import threading
+        import time
+
+        from src.find_the_dock.renderer import Renderer
+
+        renderer = Renderer.__new__(Renderer)
+        renderer.fps = 60
+        renderer.playing = True
+        renderer._manual_step = False
+        renderer._closed = False
+        renderer._condition = threading.Condition()
+        renderer._latest_state = None
+        renderer._revision = 0
+        renderer._last_publish = time.perf_counter()
+        renderer._step_started = time.perf_counter()
+        renderer.GOAL_HOLD_SECONDS = 0.05
+
+        env = Environment(render=False)
+        env.state = State(0, 3)
+        env._success = True
+
+        start = time.perf_counter()
+        renderer.after_step(env)
+        elapsed = time.perf_counter() - start
+
+        self.assertEqual(renderer._latest_state["robot"], [0, 3])
+        self.assertTrue(renderer._latest_state["success"])
+        self.assertGreaterEqual(elapsed, 0.045)
+
     def test_browser_step_advances_exactly_once_and_updates_display(self):
         import threading
         import time

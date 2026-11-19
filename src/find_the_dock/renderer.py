@@ -9,16 +9,16 @@ from pathlib import Path
 
 from aiohttp import WSMsgType, web
 
-
 _PROJECT = Path(__file__).resolve().parents[2]
 _WEB = _PROJECT / "web"
-_ASSETS = _PROJECT / "assets"
 
 
 class Renderer:
     """Host the Phaser UI locally without exposing networking to the RL algorithm."""
 
-    DISPLAY_INTERVAL = 1 / 30
+    DISPLAY_FPS = 60
+    DISPLAY_INTERVAL = 1 / DISPLAY_FPS
+    GOAL_HOLD_SECONDS = 0.18
 
     def __init__(self, fps: int | None) -> None:
         self.fps = fps
@@ -47,8 +47,12 @@ class Renderer:
             target=self._run_server, name="robot-browser-ui", daemon=True
         )
         self._thread.start()
-        if not self._ready.wait(timeout=10) or self._startup_error:
-            raise RuntimeError("Could not start the robot UI server") from self._startup_error
+        if not self._ready.wait(timeout=10):
+            raise RuntimeError("Robot UI server startup timed out")
+        if self._startup_error is not None:
+            raise RuntimeError(
+                f"Could not start the robot UI server: {self._startup_error}"
+            ) from self._startup_error
 
         url = f"http://127.0.0.1:{self._port}/"
         if not webbrowser.open(url):
@@ -77,7 +81,6 @@ class Renderer:
         app.router.add_get("/app.js", self._script)
         app.router.add_get("/style.css", self._style)
         app.router.add_get("/ws", self._websocket)
-        app.router.add_static("/assets/", _ASSETS, show_index=False)
 
         self._runner = web.AppRunner(app)
         await self._runner.setup()
@@ -163,7 +166,7 @@ class Renderer:
                 self._latest_state
                 and (self._latest_state["success"] or self._latest_state["truncated"])
             )
-            if command == "toggle_play" and not finished:
+            if command == "toggle_play":
                 self.playing = not self.playing
                 self._steps_requested = 0
             elif command == "step" and not finished and not self.playing:
@@ -182,7 +185,9 @@ class Renderer:
 
             if self._latest_state is not None:
                 self._latest_state = {
-                    **self._latest_state, "fps": self.fps, "playing": self.playing
+                    **self._latest_state,
+                    "fps": self.fps,
+                    "playing": self.playing,
                 }
                 self._revision += 1
             self._condition.notify_all()
@@ -222,7 +227,7 @@ class Renderer:
             self._revision += 1
 
         # A manual Step must reach Phaser even if an episode resets
-        # before the regular 30 Hz broadcaster wakes up.
+        # before the regular display broadcaster wakes up.
         loop = getattr(self, "_loop", None)
         if force and loop is not None and loop.is_running():
             loop.call_soon_threadsafe(
@@ -250,15 +255,26 @@ class Renderer:
         raise RuntimeError("Simulator browser closed")
 
     def after_step(self, env) -> None:
-        """Always publish a manual Step; throttle automatic playback only."""
+        """Pace playback and keep the charging dock visible at episode success."""
         with self._condition:
             manual = self._manual_step
-        self.draw(env, force=manual)
-        if manual:
+        self.draw(env, force=manual or env._success)
+
+        # A successful episode would otherwise reset before the browser can
+        # display its final state. This hold affects rendering, not rewards.
+        goal_deadline = (
+            time.perf_counter() + self.GOAL_HOLD_SECONDS if env._success else 0
+        )
+        if manual and not env._success:
             return
+
         with self._condition:
-            while not self._closed and self.fps is not None:
-                remaining = self._step_started + 1 / self.fps - time.perf_counter()
+            while not self._closed:
+                deadline = goal_deadline
+                if not manual:
+                    effective_fps = self.DISPLAY_FPS if self.fps is None else self.fps
+                    deadline = max(deadline, self._step_started + 1 / effective_fps)
+                remaining = deadline - time.perf_counter()
                 if remaining <= 0:
                     break
                 self._condition.wait(timeout=remaining)
