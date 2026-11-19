@@ -20,6 +20,14 @@ class EnvironmentTests(unittest.TestCase):
         self.assertEqual({State(0, 0): 1}[State(0, 0)], 1)
         self.assertEqual(env.terminal_state(), State(0, 3))
 
+    def test_state_is_immutable_and_hashable(self):
+        state = State(1, 2, frozenset({(0, 0)}))
+        self.assertEqual({state: "value"}[State(1, 2, {(0, 0)})], "value")
+        with self.assertRaises(AttributeError):
+            state.row = 3
+        with self.assertRaises(AttributeError):
+            del state.col
+
     def test_action_helpers(self):
         self.assertEqual([a.value for a in Action.all()], [0, 1, 2, 3])
         self.assertTrue(all(isinstance(a, Action) for a in Action.all()))
@@ -66,19 +74,22 @@ class EnvironmentTests(unittest.TestCase):
         self.assertNotEqual((state.row, state.col), (env.target.row, env.target.col))
         self.assertNotEqual(env.state, env.terminal_state())
 
-    def test_truncation(self):
+    def test_no_implicit_step_limit(self):
         env = Environment(render=False)
-        env.step(Action.LEFT)
-        env.step(Action.LEFT)
+        env.state = State(3, 0)
+
+        for _ in range(3):
+            self.assertEqual(env.step(Action.DOWN), (State(3, 0), -5.0))
+
+        self.assertEqual(env.steps, 3)
         self.assertFalse(env._success)
         self.assertNotEqual(env.state, env.terminal_state())
-        with self.assertRaises(RuntimeError):
-            env.step(Action.UP)
 
     def test_obstacles_stay_fixed_between_episodes_and_are_in_state(self):
         env = Environment(obstacles=True, render=False)
         other = Environment(obstacles=True, render=False)
-        self.assertEqual(env.obstacle_positions, other.obstacle_positions)
+        # The two instances have independent random maps (no seed parameter).
+        self.assertEqual(len(other.obstacle_positions), 2)
         self.assertEqual(len(env.obstacle_positions), 2)
         self.assertEqual(len(env._states()), 14)
         self.assertNotIn((env.start.row, env.start.col), env.obstacle_positions)
@@ -98,7 +109,8 @@ class EnvironmentTests(unittest.TestCase):
         self.assertEqual(env.obstacle_positions, previous)
         self.assertEqual(new_state.obstacles, env.obstacle_positions)
         self.assertTrue(env._path_exists(env.obstacle_positions))
-        self.assertEqual(env.obstacle_positions, other.reset().obstacles)
+        self.assertEqual(other.obstacle_positions, other.reset().obstacles)
+        self.assertTrue(other._path_exists(other.obstacle_positions))
         self.assertEqual(State(new_state.row, new_state.col, previous), new_state)
 
     def test_obstacle_collision(self):
@@ -159,13 +171,14 @@ class EnvironmentTests(unittest.TestCase):
         env.reset()
         renderer.draw.assert_called_once_with(env)
 
-    def test_close_renderer(self):
+    def test_debug_print_updates_renderer(self):
         env = Environment(render=False)
         renderer = Mock()
         env._renderer = renderer
 
-        renderer.close.assert_called_once()
-        self.assertIsNone(env._renderer)
+        env.debug_print("new message")
+
+        renderer._update_debug.assert_called_once_with("new message")
 
     def test_browser_control_state(self):
         import threading
@@ -307,8 +320,14 @@ class EnvironmentTests(unittest.TestCase):
         env = Environment(fps=None, render=False)
         self.assertIsNone(env.fps)
         self.assertIsInstance(env.step(Action.UP)[1], float)
-        with self.assertRaises(ValueError):
-            Environment(render=False)
+        with self.assertRaises(TypeError):
+            Environment(obstacles=1, render=False)
+        with self.assertRaises(TypeError):
+            Environment(title=None, render=False)
+        self.assertEqual(
+            Environment(title="Custom title", render=False).title,
+            "Custom title",
+        )
 
 
 if __name__ == "__main__":
