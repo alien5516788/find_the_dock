@@ -17,9 +17,6 @@ class Step:
 
 
 def mc_control(episode: list[Step]):
-    # We start as t+1 = terminal step which is not included in the episode
-    #   and t = last step in the episode
-
     # G_t+1
     g = 0.0
 
@@ -38,9 +35,6 @@ def mc_control(episode: list[Step]):
 
 
 def action(s: State) -> Action:
-    #  An action must be selected from a probability distribution
-    #    based on π(a | s) for each action
-
     # Exploration
     EPSILON = 0.1
 
@@ -52,7 +46,7 @@ def action(s: State) -> Action:
 
 
 def main():
-    environment = Environment(fps=10, obstacles=True, title="MC Control algorithm")
+    environment = Environment(title="MC Control algorithm")
 
     max_episodes = 1000
     max_steps = 100

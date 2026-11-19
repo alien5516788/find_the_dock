@@ -1,74 +1,96 @@
 # Find the Dock
 
-A small **4×4 reinforcement-learning environment** in Python with an optional Phaser 3 browser visualization. The environment remains independent of Gymnasium.
+A minimal **4×4 reinforcement-learning environment** in Python, with a browser visualization powered by Phaser 3.
+
+![Find the Dock simulation](screenshots/simulation.png)
 
 ## Installation
 
-From the project root:
+Requires **Python 3.12+** and Git. Add the package to an existing PDM project:
 
 ```bash
-pdm install
+pdm add "find_the_dock @ git+https://github.com/alien5516788/find_the_dock.git@main"
 ```
 
-Phaser 3.90 is loaded from a CDN when the browser page opens, so the first browser launch needs internet access. The Python side requires only `aiohttp`; no Node.js, npm, or frontend build step is necessary.
+To run the included example from the repository:
+
+```bash
+git clone https://github.com/alien5516788/find_the_dock.git
+cd find_the_dock
+pdm install
+pdm run example
+```
 
 ## Usage
 
 ```python
-from find_the_dock import Action, Environment
+from find_the_dock import State, Action, Environment
 
-env = Environment(obstacles=True, fps=30, seed=42)
+env = Environment(title="MC Control")
 
 state = env.reset()
-env.print(f"Initial state: {state}")
+env.debug_print(f"Current state: {state}")
 
-state, reward = env.step(Action.UP)
+next_state, reward = env.step(Action.RIGHT)
+
+if next_state in env.terminal_states():
+    state = env.reset()
 ```
 
-Constructing `Environment(..., render=True)` automatically launches the local visualization server and opens a browser tab. **The learning algorithm does not need to create or manage the server or WebSocket.** It uses the same `reset()`, `step()`, `terminal()`, and `print()` methods as before.
+Set `render=False` to run without the browser visualization.
 
-For headless training:
+## Environment API
+
+### Constructor
 
 ```python
-env = Environment(obstacles=True, render=False)
+Environment(
+    obstacles: bool = True,
+    fps: int | None = 10,
+    title: str = "Markov Decision Process",
+    render: bool = True,
+)
 ```
 
-This skips the browser and networking entirely.
+| Parameter | Description |
+| --- | --- |
+| `obstacles` | When `True`, places two terminal holes on the grid. Their positions stay fixed between episodes. |
+| `fps` | Target simulation steps per second when rendering. `None` selects the fast mode (60 steps/s). |
+| `title` | Text displayed in the visualization header. |
+| `render` | Opens the browser visualization when `True`; skips it when `False`. |
 
-## Browser controls
+### Methods
 
-The Phaser UI uses the same 1120×1060 dark design with rounded grid cells, a robot sprite, charging dock, two obstacles, debug panel, and control sidebar.
+| Method | Description |
+| --- | --- |
+| `reset() -> State` | Starts a new episode at a different reachable position and returns the initial state. |
+| `step(action: Action \| int) -> tuple[State, float]` | Executes one action and returns the next state and reward. Raises `RuntimeError` if the episode has already ended. |
+| `terminal_states() -> list[State]` | Returns the charging dock first, followed by the hole states (ordered by coordinates). |
+| `debug_print(message: str) -> None` | Replaces the text shown in the visualization's debug panel. |
 
-- **Play/Pause:** pauses or resumes Python simulation steps.
-- **Step:** permits exactly one agent-selected action while paused and immediately publishes its resulting state to the browser.
-- **FPS −/+ :** adjusts timed stepping from 1 to 60 FPS; an FPS passed in code above 60 remains valid.
-- **None:** toggles between unrestricted execution and the most recently selected positive FPS (defaulting to 10 when constructed with `fps=None`).
-- **Debug output:** `env.print(text)` replaces the previous message and is shown in the browser.
+The current state is available as `env.state`. Other readable environment attributes include `env.start`, `env.target`, `env.steps`, `env.obstacle_positions`, `env.fps`, and `env.title`.
 
-Timing and simulation state are controlled in Python. The browser sends only control commands and receives state snapshots. During automatic playback, snapshots are limited to about 30 per second, independent of how many Python steps execute. Manual Step updates bypass this limit. `fps=None` introduces no timing delay. Closing the browser tab stops an active rendered simulation; `env.close()` stops the internal server.
+**`Action`** is an `IntEnum` with `UP=0`, `DOWN=1`, `LEFT=2`, and `RIGHT=3`. `Action.all()` returns the available actions.
 
-The private server binds only to `127.0.0.1` on an automatically chosen port.
+**`State`** is immutable and hashable, with `row`, `col`, and `obstacles` attributes. `obstacles` is a `frozenset` of `(row, col)` coordinates.
 
-## Environment rules
+### Grid and rewards
 
-- Grid coordinates are zero-based in a fixed **4×4** grid.
-- The charging dock stays at `(0, 3)`.
-- The robot starts from a different reachable unoccupied cell on every `reset()`.
-- `obstacles=True` creates two obstacles **once per Environment instance**. The same obstacles persist across episode resets and cannot overlap the dock or the robot's starting cell.
-- The `seed` parameter makes generation reproducible.
-- `step(action)` returns `(State, reward)`; valid movement is **−1**, wall/obstacle collisions are **−5**, and arriving at the dock is **+100**.
-- Calling `step()` after the goal or the configured `max_steps` limit raises `RuntimeError` until `reset()`.
-- `terminal()` returns the terminal `State`, including current obstacle positions.
-- `State(row, col, obstacles)` is immutable and hashable and includes the full obstacle layout.
-- `Action` is an `IntEnum`: `UP=0`, `DOWN=1`, `LEFT=2`, `RIGHT=3`.
+- The grid is **4×4**, with zero-based coordinates and a fixed charging dock at `(0, 3)`.
+- The robot starts at a random reachable, non-terminal position. The starting position changes on each reset.
+- Moving to an ordinary cell: **−1**. Attempting to move outside the grid: **−5** (the robot stays in place).
+- Entering a hole: **−10**, ending the episode. Reaching the charging dock: **+100**, ending the episode.
+- After reaching a terminal state, call `reset()` before taking another action.
 
-## Run the Monte Carlo example
+## Visualization
 
-```bash
-pdm run example
-```
+The browser UI starts **paused** and provides **Play/Pause**, **Step**, and **FPS controls**. The ∞ speed option runs at a target of 60 steps/s; visual frames are capped separately. The current state and debug output are displayed alongside the grid.
+
+Phaser is loaded from a CDN, so the browser needs internet access to load it.
 
 ## Tests
+
+From the repository directory:
 
 ```bash
 pdm run test

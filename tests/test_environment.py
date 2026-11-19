@@ -6,7 +6,7 @@ from src.find_the_dock import Action, Environment, State
 
 class EnvironmentTests(unittest.TestCase):
     def test_grid_and_actions(self):
-        env = Environment(render=False)
+        env = Environment(obstacles=False, render=False)
         self.assertEqual(len(env._states()), 16)
         self.assertEqual(env._actions(), Action.all())
         previous_start = env.start
@@ -18,7 +18,7 @@ class EnvironmentTests(unittest.TestCase):
             {Action.UP, Action.DOWN, Action.LEFT, Action.RIGHT}, set(env._actions())
         )
         self.assertEqual({State(0, 0): 1}[State(0, 0)], 1)
-        self.assertEqual(env.terminal_state(), State(0, 3))
+        self.assertEqual(env.terminal_states(), [State(0, 3)])
 
     def test_state_is_immutable_and_hashable(self):
         state = State(1, 2, frozenset({(0, 0)}))
@@ -39,13 +39,13 @@ class EnvironmentTests(unittest.TestCase):
             Action(9)
 
     def test_valid_movement_and_collision(self):
-        env = Environment(render=False)
+        env = Environment(obstacles=False, render=False)
         env.state = State(3, 0)
         self.assertEqual(env.step(Action.RIGHT), (State(3, 1), -1.0))
         self.assertEqual(env.step(Action.DOWN), (State(3, 1), -5.0))
         self.assertEqual(env.step(Action.LEFT), (State(3, 0), -1.0))
         self.assertEqual(env.step(Action.LEFT), (State(3, 0), -5.0))
-        self.assertNotEqual(env.state, env.terminal_state())
+        self.assertNotIn(env.state, env.terminal_states())
 
     def test_state_keeps_layout_across_actions(self):
         env = Environment(obstacles=True, render=False)
@@ -55,16 +55,17 @@ class EnvironmentTests(unittest.TestCase):
         self.assertEqual(env.state.obstacles, layout)
 
     def test_integer_action_compatibility(self):
-        env = Environment(render=False)
+        env = Environment(obstacles=False, render=False)
         env.state = State(3, 0)
         self.assertEqual(env.step(3), (State(3, 1), -1.0))
 
     def test_goal_is_terminal(self):
-        env = Environment(render=False)
+        env = Environment(obstacles=False, render=False)
         env.state = State(0, 2)
         self.assertEqual(env.step(Action.RIGHT), (State(0, 3), 100.0))
-        self.assertEqual(env.state, env.terminal_state())
+        self.assertEqual(env.state, env.terminal_states()[0])
         self.assertTrue(env._success)
+        self.assertTrue(env._terminated)
         with self.assertRaises(RuntimeError):
             env.step(Action.LEFT)
         previous_start = env.start
@@ -72,10 +73,10 @@ class EnvironmentTests(unittest.TestCase):
         self.assertEqual((state.row, state.col), (env.start.row, env.start.col))
         self.assertNotEqual(env.start, previous_start)
         self.assertNotEqual((state.row, state.col), (env.target.row, env.target.col))
-        self.assertNotEqual(env.state, env.terminal_state())
+        self.assertNotIn(env.state, env.terminal_states())
 
     def test_no_implicit_step_limit(self):
-        env = Environment(render=False)
+        env = Environment(obstacles=False, render=False)
         env.state = State(3, 0)
 
         for _ in range(3):
@@ -83,56 +84,70 @@ class EnvironmentTests(unittest.TestCase):
 
         self.assertEqual(env.steps, 3)
         self.assertFalse(env._success)
-        self.assertNotEqual(env.state, env.terminal_state())
+        self.assertNotIn(env.state, env.terminal_states())
 
     def test_obstacles_stay_fixed_between_episodes_and_are_in_state(self):
         env = Environment(obstacles=True, render=False)
         other = Environment(obstacles=True, render=False)
-        # The two instances have independent random maps (no seed parameter).
+        layout = env.obstacle_positions
+        self.assertEqual(len(layout), 2)
         self.assertEqual(len(other.obstacle_positions), 2)
-        self.assertEqual(len(env.obstacle_positions), 2)
-        self.assertEqual(len(env._states()), 14)
-        self.assertNotIn((env.start.row, env.start.col), env.obstacle_positions)
-        self.assertNotIn((env.target.row, env.target.col), env.obstacle_positions)
-        self.assertNotEqual(env.start, env.target)
-        self.assertTrue(env._path_exists(env.obstacle_positions))
-        self.assertEqual(env.state.obstacles, env.obstacle_positions)
-        self.assertEqual(env.terminal_state().obstacles, env.obstacle_positions)
-        self.assertTrue(
-            all(s.obstacles == env.obstacle_positions for s in env._states())
-        )
-        previous = env.obstacle_positions
+        self.assertEqual(len(env._states()), 16)
+        self.assertNotIn((env.start.row, env.start.col), layout)
+        self.assertNotIn((env.target.row, env.target.col), layout)
+        self.assertTrue(env._path_exists(layout))
+        self.assertEqual(env.state.obstacles, layout)
+
+        expected_terminal_states = [State(0, 3, layout)] + [
+            State(row, col, layout) for row, col in sorted(layout)
+        ]
+        self.assertEqual(env.terminal_states(), expected_terminal_states)
+        self.assertNotIn(env.start, expected_terminal_states)
+        self.assertTrue(all(state.obstacles == layout for state in env._states()))
+
         previous_start = env.start
         new_state = env.reset()
-        self.assertNotEqual(env.start, previous_start)
-        self.assertNotIn((new_state.row, new_state.col), env.obstacle_positions)
-        self.assertEqual(env.obstacle_positions, previous)
-        self.assertEqual(new_state.obstacles, env.obstacle_positions)
-        self.assertTrue(env._path_exists(env.obstacle_positions))
-        self.assertEqual(other.obstacle_positions, other.reset().obstacles)
-        self.assertTrue(other._path_exists(other.obstacle_positions))
-        self.assertEqual(State(new_state.row, new_state.col, previous), new_state)
+        self.assertNotEqual(new_state, previous_start)
+        self.assertNotIn(new_state, expected_terminal_states)
+        self.assertEqual(env.obstacle_positions, layout)
+        self.assertEqual(new_state.obstacles, layout)
+        self.assertEqual(env.terminal_states(), expected_terminal_states)
+        self.assertTrue(env._path_exists(layout))
+        other_layout = other.obstacle_positions
+        self.assertEqual(other.reset().obstacles, other_layout)
+        self.assertEqual(other.obstacle_positions, other_layout)
 
-    def test_obstacle_collision(self):
+    def test_hole_entry_terminates_episode(self):
         env = Environment(obstacles=True, render=False)
+        layout = env.obstacle_positions
         movements = {
             Action.UP: (-1, 0),
             Action.DOWN: (1, 0),
             Action.LEFT: (0, -1),
             Action.RIGHT: (0, 1),
         }
-        for blocked in env.obstacle_positions:
+        for hole in sorted(layout):
             for action, (row_delta, col_delta) in movements.items():
-                possible_start = State(
-                    blocked[0] - row_delta,
-                    blocked[1] - col_delta,
-                    env.obstacle_positions,
-                )
-                if possible_start in env._states():
-                    env.state = possible_start
-                    self.assertEqual(env.step(action), (possible_start, -5.0))
+                start = (hole[0] - row_delta, hole[1] - col_delta)
+                if (
+                    0 <= start[0] < env.SIZE
+                    and 0 <= start[1] < env.SIZE
+                    and start not in layout
+                    and start != (env.target.row, env.target.col)
+                ):
+                    env.state = State(*start, layout)
+                    terminal = State(*hole, layout)
+                    self.assertEqual(env.step(action), (terminal, -10.0))
+                    self.assertTrue(env._terminated)
+                    self.assertFalse(env._success)
+                    self.assertIn(env.state, env.terminal_states())
+                    with self.assertRaises(RuntimeError):
+                        env.step(Action.UP)
+                    env.reset()
+                    self.assertFalse(env._terminated)
+                    self.assertNotIn(env.state, env.terminal_states())
                     return
-        self.fail("No adjacent traversable cell found")
+        self.fail("No non-terminal neighbor found for a hole")
 
     def test_invalid_action(self):
         env = Environment(render=False)
@@ -159,7 +174,7 @@ class EnvironmentTests(unittest.TestCase):
         self.assertEqual(env._debug_messages, [])
 
     def test_step_automatically_updates_renderer(self):
-        env = Environment(render=False)
+        env = Environment(obstacles=False, render=False)
         renderer = Mock()
         env._renderer = renderer
         env.state = State(3, 0)
@@ -195,7 +210,7 @@ class EnvironmentTests(unittest.TestCase):
         renderer._revision = 0
         renderer._latest_state = {
             "success": False,
-            "truncated": False,
+            "finished": False,
             "fps": 30,
             "playing": True,
         }
@@ -220,6 +235,7 @@ class EnvironmentTests(unittest.TestCase):
 
         # Reaching the dock ends an episode, not the training session.
         renderer._latest_state["success"] = True
+        renderer._latest_state["finished"] = True
         renderer._steps_requested = 0
         renderer._handle_control("toggle_play")
         self.assertTrue(renderer.playing)
@@ -243,11 +259,14 @@ class EnvironmentTests(unittest.TestCase):
         renderer._latest_state = None
         renderer._revision = 0
         renderer._step_started = time.perf_counter()
-        renderer.GOAL_HOLD_SECONDS = 0.05
+        renderer.TERMINAL_HOLD_SECONDS = 0.05
+        renderer._start_visible_until = 0.0
 
-        env = Environment(render=False)
+        env = Environment(obstacles=False, render=False)
         env.state = State(0, 3)
+        env.steps = 1
         env._success = True
+        env._terminated = True
 
         start = time.perf_counter()
         renderer.after_step(env)
@@ -255,15 +274,15 @@ class EnvironmentTests(unittest.TestCase):
 
         self.assertEqual(renderer._latest_state["robot"], [0, 3])
         self.assertTrue(renderer._latest_state["success"])
+        self.assertTrue(renderer._latest_state["finished"])
         self.assertGreaterEqual(elapsed, 0.045)
 
     def test_browser_step_advances_exactly_once_and_updates_display(self):
         import threading
-        import time
 
         from src.find_the_dock.renderer import Renderer
 
-        env = Environment(render=False)
+        env = Environment(obstacles=False, render=False)
         env.state = State(3, 0)
 
         # Minimal renderer without starting an HTTP server.
@@ -277,6 +296,8 @@ class EnvironmentTests(unittest.TestCase):
         renderer._condition = threading.Condition()
         renderer._latest_state = None
         renderer._revision = 0
+        renderer._start_visible_until = 0.0
+        renderer.START_HOLD_SECONDS = 0.0
         env._renderer = renderer
 
         renderer._handle_control("step")
