@@ -9,8 +9,7 @@ from pathlib import Path
 
 from aiohttp import WSMsgType, web
 
-_PROJECT = Path(__file__).resolve().parents[2]
-_WEB = _PROJECT / "web"
+_WEB = Path(__file__).resolve().parent / "web"
 
 
 class Renderer:
@@ -306,7 +305,9 @@ class Renderer:
             )
             if new_start:
                 # Do not let the first action overwrite the spawn before it is drawn.
-                self._start_visible_until = time.perf_counter() + self.START_HOLD_SECONDS
+                self._start_visible_until = (
+                    time.perf_counter() + self.START_HOLD_SECONDS
+                )
             self._latest_state = snapshot
             self._revision += 1
 
