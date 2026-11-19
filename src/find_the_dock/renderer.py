@@ -23,7 +23,7 @@ class Renderer:
     def __init__(self, fps: int | None) -> None:
         self.fps = fps
         self._timed_fps = fps if fps is not None else 10
-        self.playing = True
+        self.playing = False
         self._steps_requested = 0
         self._manual_step = False
         self._step_started = 0.0
@@ -35,19 +35,25 @@ class Renderer:
         self._startup_error: Exception | None = None
         self._latest_state: dict | None = None
         self._revision = 0
-        self._last_publish = 0.0
 
         self._loop: asyncio.AbstractEventLoop | None = None
         self._runner: web.AppRunner | None = None
         self._broadcast_task: asyncio.Task | None = None
         self._clients: set[web.WebSocketResponse] = set()
         self._port: int | None = None
+        self._client_queues: dict[web.WebSocketResponse, asyncio.Queue] = {}
+        self._client_tasks: dict[web.WebSocketResponse, asyncio.Task] = {}
+        self._publish_event: asyncio.Event | None = None
+        self._sent_revision = -1
+        self._disconnect_handle: asyncio.TimerHandle | None = None
+        self._page_loading_until = 0.0
 
         self._thread = threading.Thread(
             target=self._run_server, name="robot-browser-ui", daemon=True
         )
         self._thread.start()
         if not self._ready.wait(timeout=10):
+            self.close()
             raise RuntimeError("Robot UI server startup timed out")
         if self._startup_error is not None:
             raise RuntimeError(
@@ -55,8 +61,14 @@ class Renderer:
             ) from self._startup_error
 
         url = f"http://127.0.0.1:{self._port}/"
-        if not webbrowser.open(url):
-            print(f"Open the robot simulator in a browser: {url}")
+        try:
+            if not webbrowser.open(url):
+                print(f"Open the robot simulator in a browser: {url}")
+        except Exception:
+            self.close()
+            raise
+
+        print(f"Simulator browser opened: {url}")
 
     def _run_server(self) -> None:
         loop = asyncio.new_event_loop()
@@ -65,7 +77,8 @@ class Renderer:
         try:
             loop.run_until_complete(self._start_server())
             self._ready.set()
-            loop.run_forever()
+            if not self._closed:
+                loop.run_forever()
         except Exception as exc:
             self._startup_error = exc
             self._ready.set()
@@ -76,6 +89,7 @@ class Renderer:
                 loop.close()
 
     async def _start_server(self) -> None:
+        self._publish_event = asyncio.Event()
         app = web.Application()
         app.router.add_get("/", self._index)
         app.router.add_get("/app.js", self._script)
@@ -90,6 +104,12 @@ class Renderer:
         self._broadcast_task = asyncio.create_task(self._broadcast())
 
     async def _stop_server(self) -> None:
+        if self._disconnect_handle is not None:
+            self._disconnect_handle.cancel()
+        tasks = tuple(self._client_tasks.values())
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
         if self._broadcast_task is not None:
             self._broadcast_task.cancel()
             await asyncio.gather(self._broadcast_task, return_exceptions=True)
@@ -99,6 +119,9 @@ class Renderer:
             await self._runner.cleanup()
 
     async def _index(self, request: web.Request) -> web.FileResponse:
+        # A reload has begun; allow time for Phaser to load before its socket opens.
+        self._page_loading_until = time.monotonic() + 30
+        self._schedule_disconnect()
         return web.FileResponse(_WEB / "index.html")
 
     async def _script(self, request: web.Request) -> web.FileResponse:
@@ -113,14 +136,23 @@ class Renderer:
         if origin not in (None, f"http://127.0.0.1:{self._port}"):
             raise web.HTTPForbidden()
 
-        ws = web.WebSocketResponse(heartbeat=30)
+        if self._closed:
+            raise web.HTTPServiceUnavailable()
+        ws = web.WebSocketResponse(heartbeat=30, timeout=1)
         await ws.prepare(request)
         self._clients.add(ws)
+        self._page_loading_until = 0.0
+        if self._disconnect_handle is not None:
+            self._disconnect_handle.cancel()
+        queue = asyncio.Queue(maxsize=64)
+        self._client_queues[ws] = queue
+        sender = asyncio.create_task(self._send_client(ws, queue))
+        self._client_tasks[ws] = sender
 
         with self._condition:
             state = self._latest_state
         if state is not None:
-            await ws.send_json(state)
+            queue.put_nowait(json.dumps(state))
 
         try:
             async for message in ws:
@@ -134,38 +166,91 @@ class Renderer:
                     self._handle_control(data.get("command"))
         finally:
             self._clients.discard(ws)
-            # Allow a normal page reload to reconnect before considering it closed.
-            await asyncio.sleep(1)
-            if not self._clients and not self._closed:
-                self._mark_closed()
+            self._client_queues.pop(ws, None)
+            self._client_tasks.pop(ws, None)
+            sender.cancel()
+            await asyncio.gather(sender, return_exceptions=True)
+            self._schedule_disconnect()
         return ws
 
-    async def _broadcast(self) -> None:
-        previous_revision = -1
-        while True:
-            await asyncio.sleep(self.DISPLAY_INTERVAL)
-            with self._condition:
-                revision = self._revision
-                state = self._latest_state
-            if revision == previous_revision or state is None or not self._clients:
-                continue
-            previous_revision = revision
-            await self._send_now(state)
+    def _schedule_disconnect(self) -> None:
+        if self._disconnect_handle is not None:
+            self._disconnect_handle.cancel()
+        if not self._clients and not self._closed:
+            delay = max(1.0, self._page_loading_until - time.monotonic())
+            self._disconnect_handle = self._loop.call_later(delay, self._mark_closed)
 
-    async def _send_now(self, state: dict) -> None:
-        """Send an exact snapshot instead of waiting for the next display tick."""
-        for ws in tuple(self._clients):
+    async def _send_client(self, ws, queue) -> None:
+        try:
+            while True:
+                payload = await queue.get()
+                await asyncio.wait_for(ws.send_str(payload), timeout=5)
+        except (ConnectionError, RuntimeError, TimeoutError):
+            pass
+        finally:
+            await ws.close()
+
+    def _queue_snapshot(self, state: dict, revision: int) -> None:
+        # This runs only on the server loop. Each client has an independent,
+        # bounded sender so a stalled tab cannot block the other tabs.
+        if revision <= self._sent_revision:
+            return
+        self._sent_revision = revision
+        if not self._client_queues:
+            return
+        payload = json.dumps(state)
+        for ws, queue in tuple(self._client_queues.items()):
             try:
-                await ws.send_json(state)
-            except (ConnectionError, RuntimeError):
-                self._clients.discard(ws)
+                queue.put_nowait(payload)
+            except asyncio.QueueFull:
+                self._client_queues.pop(ws, None)
+                self._client_tasks[ws].cancel()
+
+    async def _broadcast(self) -> None:
+        last_send = 0.0
+        while True:
+            await self._publish_event.wait()
+            self._publish_event.clear()
+            delay = self.DISPLAY_INTERVAL - (time.perf_counter() - last_send)
+            if delay > 0:
+                await asyncio.sleep(delay)
+            with self._condition:
+                revision, state = self._revision, self._latest_state
+            if state is not None and revision > self._sent_revision:
+                self._queue_snapshot(state, revision)
+                last_send = time.perf_counter()
+
+    def _publish(self, state: dict, revision: int, force: bool) -> None:
+        if self._closed:
+            return
+        if force:
+            self._queue_snapshot(state, revision)
+        else:
+            self._publish_event.set()
+
+    def _notify_snapshot(self, *, force: bool = False) -> None:
+        loop = getattr(self, "_loop", None)
+        if loop is None or not loop.is_running():
+            return
+        with self._condition:
+            state, revision = self._latest_state, self._revision
+        try:
+            loop.call_soon_threadsafe(self._publish, state, revision, force)
+        except RuntimeError:
+            if not self._closed:
+                raise
+
+    def _update_debug(self, message: str) -> None:
+        with self._condition:
+            if self._latest_state is None or self._latest_state["debug"] == message:
+                return
+            self._latest_state = {**self._latest_state, "debug": message}
+            self._revision += 1
+        self._notify_snapshot()
 
     def _handle_control(self, command: str | None) -> None:
         with self._condition:
-            finished = bool(
-                self._latest_state
-                and (self._latest_state["success"] or self._latest_state["truncated"])
-            )
+            finished = bool(self._latest_state and self._latest_state["success"])
             if command == "toggle_play":
                 self.playing = not self.playing
                 self._steps_requested = 0
@@ -191,48 +276,29 @@ class Renderer:
                 }
                 self._revision += 1
             self._condition.notify_all()
+        self._notify_snapshot()
 
     def draw(self, env, *, force: bool = False) -> None:
-        """Publish snapshots at display speed, except for manual steps and resets."""
+        """Stage the latest state; forced snapshots bypass display throttling."""
         env.fps = self.fps
-        now = time.perf_counter()
-        with self._condition:
-            previous = self._latest_state
-            paused = not self.playing
-        just_finished = (env._success or env._truncated) and not (
-            previous and (previous["success"] or previous["truncated"])
-        )
-        new_episode = paused and env.steps == 0 and previous and previous["steps"] != 0
-        if (
-            not force
-            and not just_finished
-            and not new_episode
-            and now - self._last_publish < self.DISPLAY_INTERVAL
-        ):
-            return
-        self._last_publish = now
         state = {
             "type": "state",
+            "title": env.title,
             "robot": [env.state.row, env.state.col],
             "dock": [env.target.row, env.target.col],
             "obstacles": [list(pos) for pos in sorted(env.obstacle_positions)],
             "steps": env.steps,
             "success": env._success,
-            "truncated": env._truncated,
             "debug": "\n".join(env._debug_messages),
         }
         with self._condition:
             snapshot = {**state, "fps": self.fps, "playing": self.playing}
+            if snapshot == self._latest_state:
+                return
             self._latest_state = snapshot
             self._revision += 1
 
-        # A manual Step must reach Phaser even if an episode resets
-        # before the regular display broadcaster wakes up.
-        loop = getattr(self, "_loop", None)
-        if force and loop is not None and loop.is_running():
-            loop.call_soon_threadsafe(
-                lambda: asyncio.create_task(self._send_now(snapshot))
-            )
+        self._notify_snapshot(force=force)
 
     def before_step(self, env) -> None:
         """Block while paused, consuming at most one Step request per action."""
@@ -286,15 +352,17 @@ class Renderer:
 
     def _mark_closed(self) -> None:
         with self._condition:
+            if self._closed:
+                return
             self._closed = True
             self._closed_event.set()
             self._condition.notify_all()
+        if self._loop is not None and self._loop.is_running():
+            self._loop.call_soon_threadsafe(self._loop.stop)
 
     def close(self) -> None:
         if self._closed_event.is_set() and not self._thread.is_alive():
             return
         self._mark_closed()
-        if self._loop is not None and self._loop.is_running():
-            self._loop.call_soon_threadsafe(self._loop.stop)
         if threading.current_thread() is not self._thread:
             self._thread.join(timeout=3)

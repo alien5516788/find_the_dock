@@ -1,5 +1,6 @@
 import random
 import textwrap
+import weakref
 from collections import deque
 
 from .action import Action
@@ -25,62 +26,83 @@ class Environment:
         self,
         obstacles: bool = False,
         fps: int | None = 10,
-        max_steps: int | None = None,
-        seed: int | None = None,
+        title: str = "Markov Decision Process",
         render: bool = True,
     ) -> None:
         if not isinstance(obstacles, bool):
             raise TypeError("obstacles must be a bool")
         if fps is not None and (type(fps) is not int or fps < 1):
             raise ValueError("fps must be a positive integer or None")
-        if max_steps is not None and (type(max_steps) is not int or max_steps < 1):
-            raise ValueError("max_steps must be a positive integer or None")
 
+        if not isinstance(title, str):
+            raise TypeError("title must be a string")
+
+        self.title = title
         self.fps = fps
-        self.max_steps = max_steps
         self.start: State | None = None
         self.target = State(0, 3)
-        self._rng = random.Random(seed)
+        self._rng = random.Random()
         self._obstacles_enabled = obstacles
         self.obstacle_positions: frozenset[tuple[int, int]] = frozenset()
         self._renderer = None
+        self._starts: tuple[State, ...] = ()
         self.reset()
         if render:
             from .renderer import Renderer
 
             self._renderer = Renderer(self.fps)
+            weakref.finalize(self, self._renderer.close)
             self._renderer.draw(self)
-
-    def states(self) -> list[State]:
-        """Return every traversable position, including the terminal state."""
-        return [
-            State(row, col, self.obstacle_positions)
-            for row in range(self.SIZE)
-            for col in range(self.SIZE)
-            if (row, col) not in self.obstacle_positions
-        ]
-
-    def actions(self) -> list[Action]:
-        return Action.all()
 
     def reset(self) -> State:
         """Start a new episode on the same map with a new robot position."""
-        candidates = [
-            State(row, col)
-            for row in range(self.SIZE)
-            for col in range(self.SIZE)
-            if (row, col) != (self.target.row, self.target.col)
-            and (row, col) not in self.obstacle_positions
-            and (self.start is None or (row, col) != (self.start.row, self.start.col))
-            and self._path_exists(self.obstacle_positions, (row, col))
-        ]
-        self.start = self._rng.choice(candidates)
-        if self._obstacles_enabled and not self.obstacle_positions:
-            self.obstacle_positions = self._generate_obstacles()
-        self.state = State(self.start.row, self.start.col, self.obstacle_positions)
+        if not self._starts:
+            # Choose the initial start before placing obstacles.
+            self.start = self._rng.choice(
+                [
+                    State(row, col)
+                    for row in range(self.SIZE)
+                    for col in range(self.SIZE)
+                    if (row, col) != (self.target.row, self.target.col)
+                ]
+            )
+            if self._obstacles_enabled:
+                self.obstacle_positions = self._generate_obstacles()
+            self._goal_state = State(
+                self.target.row, self.target.col, self.obstacle_positions
+            )
+            # One flood fill from the dock finds all valid starts on this map.
+            reachable = {(self.target.row, self.target.col)}
+            queue = deque(reachable)
+            while queue:
+                row, col = queue.popleft()
+                for dr, dc in self._MOVES.values():
+                    pos = row + dr, col + dc
+                    if (
+                        0 <= pos[0] < self.SIZE
+                        and 0 <= pos[1] < self.SIZE
+                        and pos not in self.obstacle_positions
+                        and pos not in reachable
+                    ):
+                        reachable.add(pos)
+                        queue.append(pos)
+            self._starts = tuple(
+                State(row, col, self.obstacle_positions)
+                for row, col in sorted(reachable)
+                if (row, col) != (self.target.row, self.target.col)
+            )
+            self.start = next(
+                s
+                for s in self._starts
+                if (s.row, s.col) == (self.start.row, self.start.col)
+            )
+        else:
+            self.start = self._rng.choice(
+                tuple(s for s in self._starts if s is not self.start)
+            )
+        self.state = self.start
         self.steps = 0
         self._success = False
-        self._truncated = False
         self._debug_messages: list[str] = []
         if self._renderer is not None:
             self._renderer.draw(self)
@@ -88,7 +110,7 @@ class Environment:
 
     def step(self, action: Action | int) -> tuple[State, float]:
         """Apply an action and return the resulting state and reward."""
-        if self._success or self._truncated:
+        if self._success:
             raise RuntimeError("Episode finished. Call reset() before stepping again.")
         if isinstance(action, bool) or not isinstance(action, int):
             raise TypeError("action must be a valid Action")
@@ -100,48 +122,50 @@ class Environment:
         if self._renderer is not None:
             self._renderer.before_step(self)
 
-        next_state = self._move(self.state, action)
+        dr, dc = self._MOVES[action]
+        row, col = self.state.row + dr, self.state.col + dc
 
         if (
-            not self._within_grid(next_state)
-            or (next_state.row, next_state.col) in self.obstacle_positions
+            not (0 <= row < self.SIZE and 0 <= col < self.SIZE)
+            or (row, col) in self.obstacle_positions
         ):
             reward = -5.0
         else:
-            self.state = next_state
+            self.state = State(row, col, self.obstacle_positions)
             reward = -1.0
 
         self.steps += 1
 
-        if self.state == self.terminal():
+        if self.state == self.terminal_state():
             self._success = True
             reward = 100.0
-        elif self.max_steps is not None and self.steps >= self.max_steps:
-            self._truncated = True
 
         if self._renderer is not None:
             self._renderer.after_step(self)
 
         return self.state, reward
 
-    def terminal(self) -> State:
+    def terminal_state(self) -> State:
         """Return the terminal goal state (the charging station)."""
-        return State(self.target.row, self.target.col, self.obstacle_positions)
+        return self._goal_state
 
-    def print(self, message: str) -> None:
+    def debug_print(self, message: str) -> None:
         """Replace the on-screen debug text with the latest message."""
         self._debug_messages = [textwrap.dedent(str(message)).strip("\n")]
-
-    def wait_until_closed(self) -> None:
-        """Keep the completed simulation visible until its window is closed."""
         if self._renderer is not None:
-            self._renderer.wait_until_closed(self)
+            self._renderer._update_debug(self._debug_messages[0])
 
-    def close(self) -> None:
-        """Stop the private browser renderer, if one was started."""
-        if self._renderer is not None:
-            self._renderer.close()
-            self._renderer = None
+    def _states(self) -> list[State]:
+        """Return every traversable position, including the terminal state."""
+        return [
+            State(row, col, self.obstacle_positions)
+            for row in range(self.SIZE)
+            for col in range(self.SIZE)
+            if (row, col) not in self.obstacle_positions
+        ]
+
+    def _actions(self) -> list[Action]:
+        return Action.all()
 
     def _within_grid(self, state: State) -> bool:
         return 0 <= state.row < self.SIZE and 0 <= state.col < self.SIZE
@@ -159,7 +183,8 @@ class Environment:
             (row, col)
             for row in range(self.SIZE)
             for col in range(self.SIZE)
-            if (row, col) not in (
+            if (row, col)
+            not in (
                 (self.start.row, self.start.col),
                 (self.target.row, self.target.col),
             )

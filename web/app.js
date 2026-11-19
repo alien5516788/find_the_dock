@@ -122,7 +122,7 @@ class RobotScene extends Phaser.Scene {
     this.text(68, 75, "FIND THE DOCK", 37, COLORS.white, {
       mono: false, bold: true, spacing: 3,
     });
-    this.text(69, 132, "MARKOV DECISION PROCESS     /     GRID WORLD 04 × 04", 15, COLORS.muted);
+    this.titleText = this.text(69, 132, "MARKOV DECISION PROCESS     /     GRID WORLD 04 × 04", 15, COLORS.muted);
     this.line(68, 173, 1052, 173);
 
     this.text(68, 198, "01  /  ENVIRONMENT", 14, COLORS.gold);
@@ -141,6 +141,9 @@ class RobotScene extends Phaser.Scene {
   }
 
   drawCell(graphics, row, col, blocked, charging, occupied) {
+    const signature = Number(blocked) | (Number(charging) << 1) | (Number(occupied) << 2);
+    if (graphics.cellSignature === signature) return;
+    graphics.cellSignature = signature;
     const x = BOARD.x + col * (BOARD.cell + BOARD.gap);
     const y = BOARD.y + row * (BOARD.cell + BOARD.gap);
     const size = BOARD.cell;
@@ -225,7 +228,7 @@ class RobotScene extends Phaser.Scene {
 
     this.stepsText = this.text(758, 320, "0 STEPS", 24, COLORS.white);
     this.telemetryStatus = this.text(
-      1027, 332, "RUNNING", 11, COLORS.muted, { originX: 1 }
+      1027, 332, "PAUSED", 11, COLORS.muted, { originX: 1 }
     );
 
     this.line(758, 383, 1027, 383);
@@ -260,9 +263,9 @@ class RobotScene extends Phaser.Scene {
 
     this.text(91, 878, "03 / PLAYBACK", 13, COLORS.gold);
     this.buttons.play = this.button(
-      91, 918, 221, 65, "PAUSE", COLORS.red, "toggle_play", 20
+      91, 918, 221, 65, "PLAY", COLORS.green, "toggle_play", 20
     );
-    this.modeText = this.text(91, 994, "AUTO / RUNNING", 11, COLORS.muted);
+    this.modeText = this.text(91, 994, "AUTO / PAUSED", 11, COLORS.muted);
 
     this.line(333, 883, 333, 1009);
     this.text(358, 878, "04 / FRAME RATE", 13, COLORS.gold);
@@ -354,6 +357,8 @@ class RobotScene extends Phaser.Scene {
   }
 
   applyState(state) {
+    const title = (state.title ?? "Markov Decision Process").toUpperCase();
+    this.titleText.setText(title + "     /     GRID WORLD 04 × 04");
     const obstacles = new Set(
       state.obstacles.map(([row, col]) => row + "," + col)
     );
@@ -368,7 +373,7 @@ class RobotScene extends Phaser.Scene {
       }
     }
 
-    const finished = state.success || state.truncated;
+    const finished = state.success;
     const mode = finished ? "FINISHED"
       : state.playing ? "RUNNING" : "PAUSED";
     this.stepsText.setText(String(state.steps) + " STEPS");

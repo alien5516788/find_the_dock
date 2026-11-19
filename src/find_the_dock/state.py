@@ -13,6 +13,9 @@ class State:
     def __setattr__(self, name: str, value: object) -> None:
         raise AttributeError("State is immutable")
 
+    def __delattr__(self, name: str) -> None:
+        raise AttributeError("State is immutable")
+
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, State):
             return NotImplemented

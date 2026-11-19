@@ -52,21 +52,22 @@ def action(s: State) -> Action:
 
 
 def main():
-    environment = Environment(fps=40, obstacles=True)
-    episodes = 3000
+    environment = Environment(fps=10, obstacles=True, title="MC Control algorithm")
+
+    max_episodes = 1000
     max_steps = 100
 
-    for ep_no in range(episodes):
+    for ep_no in range(max_episodes):
         s = environment.reset()
 
         # Generate one complete episode
         episode: list[Step] = []
 
-        while s != environment.terminal() and len(episode) < max_steps:
+        while s != environment.terminal_state() and len(episode) < max_steps:
             a = action(s)
 
-            environment.print(
-                f"Episode: {ep_no}\nState: {s}\nAction: {a.name}\nQ(s, a): {qvalue.get((s, a), 0)}"
+            environment.debug_print(
+                f"Episode: {ep_no + 1}\nState: {s}\nAction: {a.name}\nQ(s, a): {qvalue.get((s, a), 0)}"
             )
 
             # E(s, a) -> (s', r)
