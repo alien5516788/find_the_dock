@@ -25,7 +25,7 @@ class Environment:
 
     def __init__(
         self,
-        obstacles: bool = False,
+        obstacles: bool = True,
         fps: int | None = 10,
         title: str = "Markov Decision Process",
         render: bool = True,
@@ -135,7 +135,7 @@ class Environment:
             reward = -5.0
         else:
             self.state = State(row, col, self.obstacle_positions)
-            reward = -5.0 if (row, col) in self.obstacle_positions else -1.0
+            reward = -10.0 if (row, col) in self.obstacle_positions else -1.0
 
         self.steps += 1
 
