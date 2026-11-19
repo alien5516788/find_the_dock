@@ -1,11 +1,11 @@
 [project]
 name = "find_the_dock"
 version = "0.1.0"
-description = "Default template for PDM package"
+description = "A minimal 4x4 robot charging environment for reinforcement learning"
 authors = [
     {name = "alien5516788",email = "93880176+alien5516788@users.noreply.github.com"},
 ]
-dependencies = []
+dependencies = ["aiohttp>=3.11,<4"]
 requires-python = ">=3.12"
 readme = "README.md"
 license = "MIT"
@@ -17,3 +17,7 @@ build-backend = "pdm.backend"
 
 [tool.pdm]
 distribution = true
+
+[tool.pdm.scripts]
+test = "python3 -m tests.test_environment"
+example = "python3 -m examples.mc_control"
