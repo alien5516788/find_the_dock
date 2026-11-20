@@ -45,7 +45,7 @@ def action(s: State) -> Action:
     return max(Action.all(), key=lambda a: qvalue.get((s, a), 0.0))
 
 
-def main():
+def train():
     environment = Environment(title="MC Control algorithm")
 
     max_episodes = 1000
@@ -61,7 +61,7 @@ def main():
             a = action(s)
 
             environment.debug_print(
-                f"Episode: {ep_no + 1}\nState: {s}\nAction: {a.name}\nQ(s, a): {qvalue.get((s, a), 0)}"
+                f"Episode: {ep_no + 1}\nAction: {a.name}\nQ(s, a): {qvalue.get((s, a), 0)}"
             )
 
             # E(s, a) -> (s', r)
@@ -77,6 +77,6 @@ def main():
 
 if __name__ == "__main__":
     try:
-        main()
+        train()
     except Exception as e:
         print(e)
